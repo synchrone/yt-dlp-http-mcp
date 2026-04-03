@@ -23,6 +23,7 @@ const child = spawn('supergateway', [
   '--stdio', 'yt-dlp-mcp',
   '--outputTransport', 'streamableHttp',
   '--port', String(INTERNAL_PORT),
+  '--stateful',
   '--cors',
   '--healthEndpoint', '/healthz',
 ], { stdio: 'inherit' });
@@ -84,6 +85,13 @@ function baseUrl(req) {
 const server = createServer(async (req, res) => {
   const base = baseUrl(req);
   const url = new URL(req.url, base);
+
+  const start = Date.now();
+  const origEnd = res.end.bind(res);
+  res.end = (...args) => {
+    console.log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - start}ms`);
+    return origEnd(...args);
+  };
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
