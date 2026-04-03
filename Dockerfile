@@ -23,11 +23,8 @@ VOLUME /root/Downloads
 # Pre-install MCP server and supergateway
 RUN npm install -g @kevinwatt/yt-dlp-mcp@latest supergateway
 
+COPY oauth-proxy.mjs /app/oauth-proxy.mjs
+
 EXPOSE 8000
 
-CMD ["supergateway", \
-     "--stdio", "yt-dlp-mcp", \
-     "--outputTransport", "streamableHttp", \
-     "--port", "8000", \
-     "--cors", \
-     "--healthEndpoint", "/healthz"]
+CMD ["node", "/app/oauth-proxy.mjs"]
