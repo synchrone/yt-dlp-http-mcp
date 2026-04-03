@@ -32,6 +32,10 @@ pass() { echo "PASS: $1"; }
 # --- Health ---
 curl -sf $BASE/healthz >/dev/null && pass "healthz" || fail "healthz"
 
+# --- Protected resource metadata (RFC 9728) ---
+PRM=$(curl -sf $BASE/.well-known/oauth-protected-resource)
+echo "$PRM" | grep -q '"authorization_servers"' && pass "protected resource metadata" || fail "protected resource metadata"
+
 # --- OAuth discovery ---
 DISCOVERY=$(curl -sf $BASE/.well-known/oauth-authorization-server)
 echo "$DISCOVERY" | grep -q '"authorization_endpoint"' && pass "oauth discovery" || fail "oauth discovery"
@@ -41,11 +45,12 @@ FWD=$(curl -sf $BASE/.well-known/oauth-authorization-server \
   -H "X-Forwarded-Proto: https" -H "X-Forwarded-Host: mcp.example.com")
 echo "$FWD" | grep -q '"https://mcp.example.com/authorize"' && pass "forwarded headers" || fail "forwarded headers"
 
-# --- Unauthenticated MCP is rejected ---
-STATUS=$(curl -so /dev/null -w '%{http_code}' -X POST $BASE/mcp \
+# --- Unauthenticated MCP is rejected with WWW-Authenticate ---
+UNAUTH_HEADERS=$(curl -si -X POST $BASE/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
-[ "$STATUS" = "401" ] && pass "unauthenticated rejected" || fail "unauthenticated rejected (got $STATUS)"
+echo "$UNAUTH_HEADERS" | grep -q '401' && pass "unauthenticated rejected" || fail "unauthenticated rejected"
+echo "$UNAUTH_HEADERS" | grep -qi 'WWW-Authenticate.*resource_metadata' && pass "WWW-Authenticate header" || fail "WWW-Authenticate header"
 
 # --- Invalid client_id at /authorize ---
 STATUS=$(curl -so /dev/null -w '%{http_code}' "$BASE/authorize?client_id=wrong&redirect_uri=http://localhost/cb&response_type=code")

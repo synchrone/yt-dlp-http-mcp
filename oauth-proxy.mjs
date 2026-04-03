@@ -91,6 +91,15 @@ const server = createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
+  // Protected resource metadata (RFC 9728)
+  if (url.pathname === '/.well-known/oauth-protected-resource') {
+    return json(res, 200, {
+      resource: `${base}/mcp`,
+      authorization_servers: [base],
+      bearer_methods_supported: ['header'],
+    });
+  }
+
   // OAuth discovery
   if (url.pathname === '/.well-known/oauth-authorization-server') {
     return json(res, 200, {
@@ -164,8 +173,10 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/mcp') {
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (!token || !tokens.has(token))
+    if (!token || !tokens.has(token)) {
+      res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`);
       return json(res, 401, { error: 'unauthorized' });
+    }
     return proxy(req, res);
   }
 
