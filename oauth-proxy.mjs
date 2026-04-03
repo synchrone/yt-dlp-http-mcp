@@ -6,7 +6,7 @@ const PORT = parseInt(process.env.PORT || '8000');
 const INTERNAL_PORT = 8001;
 const CLIENT_ID = process.env.MCP_CLIENT_ID;
 const CLIENT_SECRET = process.env.MCP_CLIENT_SECRET;
-const BASE_URL = process.env.MCP_BASE_URL || `http://localhost:${PORT}`;
+const STATIC_BASE_URL = process.env.MCP_BASE_URL || '';
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error('MCP_CLIENT_ID and MCP_CLIENT_SECRET must be set');
@@ -73,9 +73,17 @@ function json(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function baseUrl(req) {
+  if (STATIC_BASE_URL) return STATIC_BASE_URL;
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  return `${proto}://${host}`;
+}
+
 // --- server ---
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, BASE_URL);
+  const base = baseUrl(req);
+  const url = new URL(req.url, base);
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -86,9 +94,9 @@ const server = createServer(async (req, res) => {
   // OAuth discovery
   if (url.pathname === '/.well-known/oauth-authorization-server') {
     return json(res, 200, {
-      issuer: BASE_URL,
-      authorization_endpoint: `${BASE_URL}/authorize`,
-      token_endpoint: `${BASE_URL}/token`,
+      issuer: base,
+      authorization_endpoint: `${base}/authorize`,
+      token_endpoint: `${base}/token`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
       code_challenge_methods_supported: ['S256', 'plain'],
@@ -166,7 +174,8 @@ const server = createServer(async (req, res) => {
 
 setTimeout(() => {
   server.listen(PORT, () => {
-    console.log(`OAuth MCP proxy listening on ${BASE_URL}`);
-    console.log(`MCP endpoint: ${BASE_URL}/mcp`);
+    const display = STATIC_BASE_URL || `http://localhost:${PORT}`;
+    console.log(`OAuth MCP proxy listening on ${display}`);
+    console.log(`MCP endpoint: ${display}/mcp`);
   });
 }, 1000);
