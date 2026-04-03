@@ -45,10 +45,21 @@ function proxy(req, res) {
   delete opts.headers.authorization;
 
   const p = httpRequest(opts, (pRes) => {
+    // Disable buffering for SSE streams
     res.writeHead(pRes.statusCode, pRes.headers);
-    pRes.pipe(res);
+    if (pRes.headers['content-type']?.includes('text/event-stream')) {
+      res.flushHeaders();
+      pRes.on('data', (chunk) => { res.write(chunk); res.flushHeaders?.(); });
+      pRes.on('end', () => res.end());
+    } else {
+      pRes.pipe(res);
+    }
   });
-  p.on('error', () => { res.writeHead(502); res.end('Bad Gateway'); });
+  p.on('error', () => {
+    if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway'); }
+  });
+  // When client disconnects, tear down the proxied request
+  res.on('close', () => { if (!res.writableFinished) p.destroy(); });
   req.pipe(p);
 }
 
