@@ -7,6 +7,8 @@ const INTERNAL_PORT = 8001;
 const CLIENT_ID = process.env.MCP_CLIENT_ID;
 const CLIENT_SECRET = process.env.MCP_CLIENT_SECRET;
 const STATIC_BASE_URL = process.env.MCP_BASE_URL || '';
+const DOWNLOAD_URL_PREFIX = process.env.DOWNLOAD_URL_PREFIX || '';
+const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/root/Downloads';
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error('MCP_CLIENT_ID and MCP_CLIENT_SECRET must be set');
@@ -34,6 +36,11 @@ child.on('exit', (code) => {
 });
 
 // --- helpers ---
+function rewriteDownloadPaths(buf) {
+  if (!DOWNLOAD_URL_PREFIX) return buf;
+  return buf.replaceAll(DOWNLOAD_DIR, DOWNLOAD_URL_PREFIX);
+}
+
 function proxy(req, res) {
   const opts = {
     hostname: '127.0.0.1',
@@ -45,12 +52,25 @@ function proxy(req, res) {
   delete opts.headers.authorization;
 
   const p = httpRequest(opts, (pRes) => {
-    // Disable buffering for SSE streams
-    res.writeHead(pRes.statusCode, pRes.headers);
-    if (pRes.headers['content-type']?.includes('text/event-stream')) {
+    const isSSE = pRes.headers['content-type']?.includes('text/event-stream');
+    // Strip content-length when rewriting — length may change
+    const headers = { ...pRes.headers };
+    if (DOWNLOAD_URL_PREFIX) delete headers['content-length'];
+    res.writeHead(pRes.statusCode, headers);
+
+    if (isSSE) {
       res.flushHeaders();
-      pRes.on('data', (chunk) => { res.write(chunk); res.flushHeaders?.(); });
+      pRes.on('data', (chunk) => {
+        res.write(rewriteDownloadPaths(chunk.toString()));
+        res.flushHeaders?.();
+      });
       pRes.on('end', () => res.end());
+    } else if (DOWNLOAD_URL_PREFIX) {
+      const chunks = [];
+      pRes.on('data', (chunk) => chunks.push(chunk));
+      pRes.on('end', () => {
+        res.end(rewriteDownloadPaths(Buffer.concat(chunks).toString()));
+      });
     } else {
       pRes.pipe(res);
     }
