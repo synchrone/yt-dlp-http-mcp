@@ -21,7 +21,7 @@ docker run -d --name yt-dlp-mcp --restart unless-stopped \
 | `ACCESS_TOKEN_TTL` | `86400` (1 day) | Access token lifetime, seconds |
 | `REFRESH_TOKEN_TTL` | `7776000` (90 days) | Refresh token lifetime, seconds; each refresh issues a new one |
 | `MCP_BASE_URL` | derived from request | Public base URL, e.g. `https://yt.example.com` |
-| `DOWNLOAD_DIR` | `/root/Downloads` | Download location inside the container |
+| `DOWNLOAD_DIR` | `/root/Downloads` | Download location inside the container; also passed to yt-dlp-mcp as `YTDLP_DOWNLOADS_DIR` |
 | `DOWNLOAD_URL_PREFIX` | unset | Public URL where `DOWNLOAD_DIR` is served, e.g. `https://nas.example.com/yt`. Download tools then return a full per-file URL instead of a container path |
 | `PORT` | `8000` | Listen port |
 

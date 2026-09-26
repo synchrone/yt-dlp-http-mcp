@@ -2,7 +2,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const PORT = parseInt(process.env.PORT || '8000');
 const INTERNAL_PORT = 8001;
@@ -10,7 +10,7 @@ const CLIENT_ID = process.env.MCP_CLIENT_ID;
 const CLIENT_SECRET = process.env.MCP_CLIENT_SECRET;
 const STATIC_BASE_URL = process.env.MCP_BASE_URL || '';
 const DOWNLOAD_URL_PREFIX = process.env.DOWNLOAD_URL_PREFIX || '';
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/root/Downloads';
+const DOWNLOAD_DIR = resolve(process.env.DOWNLOAD_DIR || '/root/Downloads');
 const TOKEN_SECRET = process.env.MCP_TOKEN_SECRET || CLIENT_SECRET;
 const ACCESS_TOKEN_TTL = parseInt(process.env.ACCESS_TOKEN_TTL || '86400');
 const REFRESH_TOKEN_TTL = parseInt(process.env.REFRESH_TOKEN_TTL || String(90 * 86400));
@@ -63,7 +63,7 @@ const child = spawn('supergateway', [
   '--stateful',
   '--cors',
   '--healthEndpoint', '/healthz',
-], { stdio: 'inherit' });
+], { stdio: 'inherit', env: { ...process.env, YTDLP_DOWNLOADS_DIR: DOWNLOAD_DIR } });
 
 child.on('exit', (code) => {
   console.error(`supergateway exited with code ${code}`);
