@@ -1,6 +1,6 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const PORT = parseInt(process.env.PORT || '8000');
 const INTERNAL_PORT = 8001;
@@ -9,6 +9,9 @@ const CLIENT_SECRET = process.env.MCP_CLIENT_SECRET;
 const STATIC_BASE_URL = process.env.MCP_BASE_URL || '';
 const DOWNLOAD_URL_PREFIX = process.env.DOWNLOAD_URL_PREFIX || '';
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || '/root/Downloads';
+const TOKEN_SECRET = process.env.MCP_TOKEN_SECRET || CLIENT_SECRET;
+const ACCESS_TOKEN_TTL = parseInt(process.env.ACCESS_TOKEN_TTL || '86400');
+const REFRESH_TOKEN_TTL = parseInt(process.env.REFRESH_TOKEN_TTL || String(90 * 86400));
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error('MCP_CLIENT_ID and MCP_CLIENT_SECRET must be set');
@@ -16,9 +19,39 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
 }
 
 const codes = new Map();   // code -> { redirectUri, codeChallenge, codeChallengeMethod, expiresAt }
-const tokens = new Set();
 
 const gen = () => randomBytes(32).toString('hex');
+
+const mac = (body) => createHmac('sha256', TOKEN_SECRET).update(body).digest('base64url');
+
+function signToken(typ, ttl) {
+  const exp = Math.floor(Date.now() / 1000) + ttl;
+  const body = Buffer.from(JSON.stringify({ typ, exp, jti: randomBytes(8).toString('hex') })).toString('base64url');
+  return `${body}.${mac(body)}`;
+}
+
+function verifyToken(token, typ) {
+  const [body, sig] = (token || '').split('.');
+  if (!body || !sig) return false;
+  const expected = Buffer.from(mac(body));
+  const given = Buffer.from(sig);
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return false;
+  try {
+    const claims = JSON.parse(Buffer.from(body, 'base64url').toString());
+    return claims.typ === typ && claims.exp > Date.now() / 1000;
+  } catch {
+    return false;
+  }
+}
+
+function issueTokens(res) {
+  return json(res, 200, {
+    access_token: signToken('access', ACCESS_TOKEN_TTL),
+    token_type: 'Bearer',
+    expires_in: ACCESS_TOKEN_TTL,
+    refresh_token: signToken('refresh', REFRESH_TOKEN_TTL),
+  });
+}
 
 // --- supergateway child process ---
 const child = spawn('supergateway', [
@@ -120,7 +153,7 @@ const server = createServer(async (req, res) => {
   const start = Date.now();
   const origEnd = res.end.bind(res);
   res.end = (...args) => {
-    console.log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - start}ms`);
+    console.log(`${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - start}ms${res.logNote ? ` ${res.logNote}` : ''}`);
     return origEnd(...args);
   };
 
@@ -146,7 +179,7 @@ const server = createServer(async (req, res) => {
       authorization_endpoint: `${base}/authorize`,
       token_endpoint: `${base}/token`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256', 'plain'],
       token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic'],
     });
@@ -180,6 +213,12 @@ const server = createServer(async (req, res) => {
     if (clientId !== CLIENT_ID || clientSecret !== CLIENT_SECRET)
       return json(res, 401, { error: 'invalid_client' });
 
+    if (body.get('grant_type') === 'refresh_token') {
+      if (!verifyToken(body.get('refresh_token'), 'refresh'))
+        return json(res, 400, { error: 'invalid_grant' });
+      return issueTokens(res);
+    }
+
     const code = body.get('code');
     if (body.get('grant_type') !== 'authorization_code' || !codes.has(code))
       return json(res, 400, { error: 'invalid_grant' });
@@ -199,10 +238,7 @@ const server = createServer(async (req, res) => {
       if (!ok) return json(res, 400, { error: 'invalid_grant', error_description: 'PKCE failed' });
     }
 
-    const accessToken = gen();
-    tokens.add(accessToken);
-
-    return json(res, 200, { access_token: accessToken, token_type: 'Bearer' });
+    return issueTokens(res);
   }
 
   // Health — no auth
@@ -212,8 +248,10 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/mcp') {
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (!token || !tokens.has(token)) {
-      res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+    if (!verifyToken(token, 'access')) {
+      const err = token ? 'error="invalid_token", ' : '';
+      res.logNote = token ? 'invalid_token' : 'no_token';
+      res.setHeader('WWW-Authenticate', `Bearer ${err}resource_metadata="${base}/.well-known/oauth-protected-resource"`);
       return json(res, 401, { error: 'unauthorized' });
     }
     return proxy(req, res);

@@ -110,5 +110,41 @@ MCP_RESP=$(curl -sf -X POST $BASE/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
 echo "$MCP_RESP" | grep -q '"yt-dlp-mcp"' && pass "MCP initialize" || fail "MCP initialize: $MCP_RESP"
 
+# --- Token response carries expiry and refresh token ---
+echo "$TOKEN_RESP" | grep -q '"expires_in"' && pass "expires_in issued" || fail "expires_in missing: $TOKEN_RESP"
+REFRESH=$(echo "$TOKEN_RESP" | grep -oP '"refresh_token":"\K[^"]+')
+[ -n "$REFRESH" ] && pass "refresh token issued" || fail "refresh token missing: $TOKEN_RESP"
+
+# --- Refresh grant ---
+REFRESH_RESP=$(curl -sf -X POST $BASE/token \
+  -d "grant_type=refresh_token&refresh_token=$REFRESH&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET")
+echo "$REFRESH_RESP" | grep -q '"access_token"' && pass "refresh grant" || fail "refresh grant: $REFRESH_RESP"
+
+# --- Access token rejected as refresh token ---
+STATUS=$(curl -so /dev/null -w '%{http_code}' -X POST $BASE/token \
+  -d "grant_type=refresh_token&refresh_token=$TOKEN&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET")
+[ "$STATUS" = "400" ] && pass "access token not usable as refresh" || fail "access token not usable as refresh (got $STATUS)"
+
+# --- Tampered token rejected ---
+STATUS=$(curl -so /dev/null -w '%{http_code}' -X POST $BASE/mcp \
+  -H "Content-Type: application/json" -H "Authorization: Bearer ${TOKEN}x" -d '{}')
+[ "$STATUS" = "401" ] && pass "tampered token rejected" || fail "tampered token rejected (got $STATUS)"
+
+# --- Tokens survive restart ---
+docker restart $CONTAINER >/dev/null
+for i in $(seq 1 30); do
+  if curl -sf $BASE/healthz &>/dev/null; then break; fi
+  sleep 0.5
+done
+MCP_RESP2=$(curl -sf -X POST $BASE/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
+echo "$MCP_RESP2" | grep -q '"yt-dlp-mcp"' && pass "access token survives restart" || fail "access token survives restart: $MCP_RESP2"
+REFRESH_RESP2=$(curl -sf -X POST $BASE/token \
+  -d "grant_type=refresh_token&refresh_token=$REFRESH&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET")
+echo "$REFRESH_RESP2" | grep -q '"access_token"' && pass "refresh survives restart" || fail "refresh survives restart: $REFRESH_RESP2"
+
 echo ""
 echo "=== All tests passed ==="
