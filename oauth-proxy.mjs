@@ -1,6 +1,8 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { unlink } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 
 const PORT = parseInt(process.env.PORT || '8000');
 const INTERNAL_PORT = 8001;
@@ -69,59 +71,134 @@ child.on('exit', (code) => {
 });
 
 // --- helpers ---
-function rewriteDownloadPaths(buf) {
-  if (!DOWNLOAD_URL_PREFIX) return buf;
-  return buf.replaceAll(DOWNLOAD_DIR, DOWNLOAD_URL_PREFIX);
+const DELETE_TOOL = {
+  name: 'ytdlp_delete_download',
+  description: 'Delete a file previously saved by a download tool. Pass the filename or the URL the download tool returned.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: 'Filename or download URL returned by a download tool' },
+    },
+    required: ['file'],
+  },
+};
+
+const urlPrefix = DOWNLOAD_URL_PREFIX.replace(/\/+$/, '');
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const downloadedAs = new RegExp(`downloaded as "([^"]+)" to ${escapeRe(DOWNLOAD_DIR)}/?(?=\\s|$)`, 'g');
+
+function rewriteText(text) {
+  if (!urlPrefix) return text;
+  return text
+    .replace(downloadedAs, (_, name) => `downloaded as "${name}": ${urlPrefix}/${encodeURIComponent(name)}`)
+    .replaceAll(DOWNLOAD_DIR, urlPrefix);
 }
 
-function proxy(req, res) {
-  const opts = {
-    hostname: '127.0.0.1',
-    port: INTERNAL_PORT,
-    path: req.url,
-    method: req.method,
-    headers: { ...req.headers, host: `127.0.0.1:${INTERNAL_PORT}` },
-  };
-  delete opts.headers.authorization;
+function transformMessage(msg) {
+  const result = msg?.result;
+  if (Array.isArray(result?.tools)) result.tools.push(DELETE_TOOL);
+  if (Array.isArray(result?.content)) {
+    for (const item of result.content) {
+      if (item.type === 'text') item.text = rewriteText(item.text);
+    }
+  }
+  return msg;
+}
 
-  const p = httpRequest(opts, (pRes) => {
-    const isSSE = pRes.headers['content-type']?.includes('text/event-stream');
-    // Strip content-length when rewriting — length may change
-    const headers = { ...pRes.headers };
-    if (DOWNLOAD_URL_PREFIX) delete headers['content-length'];
-    res.writeHead(pRes.statusCode, headers);
+function transformPayload(payload) {
+  try {
+    const parsed = JSON.parse(payload);
+    return JSON.stringify(Array.isArray(parsed) ? parsed.map(transformMessage) : transformMessage(parsed));
+  } catch {
+    return payload;
+  }
+}
 
-    if (isSSE) {
+const transformSseEvent = (event) => event
+  .split('\n')
+  .map((line) => line.startsWith('data:') ? `data: ${transformPayload(line.slice(5).trimStart())}` : line)
+  .join('\n');
+
+function toolResult(text, isError = false) {
+  return { content: [{ type: 'text', text }], ...(isError && { isError }) };
+}
+
+async function deleteDownload(file) {
+  if (typeof file !== 'string' || !file) return toolResult('file is required', true);
+  let name = file;
+  try {
+    if (urlPrefix && name.startsWith(`${urlPrefix}/`)) name = decodeURIComponent(name.slice(urlPrefix.length + 1));
+  } catch {
+    return toolResult(`Invalid URL: ${file}`, true);
+  }
+  if (name.startsWith(`${DOWNLOAD_DIR}/`)) name = name.slice(DOWNLOAD_DIR.length + 1);
+  if (!name || name === '.' || name === '..' || basename(name) !== name)
+    return toolResult(`Invalid filename: ${file}`, true);
+  try {
+    await unlink(join(DOWNLOAD_DIR, name));
+  } catch (err) {
+    return toolResult(err.code === 'ENOENT' ? `Not found: ${name}` : `Delete failed: ${err.message}`, true);
+  }
+  return toolResult(`Deleted "${name}"`);
+}
+
+function proxy(req, res, body) {
+  const headers = { ...req.headers, host: `127.0.0.1:${INTERNAL_PORT}` };
+  delete headers.authorization;
+  if (body) {
+    delete headers['transfer-encoding'];
+    headers['content-length'] = body.length;
+  }
+
+  const p = httpRequest({ hostname: '127.0.0.1', port: INTERNAL_PORT, path: req.url, method: req.method, headers }, (pRes) => {
+    const type = pRes.headers['content-type'] || '';
+    const resHeaders = { ...pRes.headers };
+
+    if (type.includes('text/event-stream')) {
+      res.writeHead(pRes.statusCode, resHeaders);
       res.flushHeaders();
+      let pending = '';
+      pRes.setEncoding('utf8');
       pRes.on('data', (chunk) => {
-        res.write(rewriteDownloadPaths(chunk.toString()));
-        res.flushHeaders?.();
+        const events = (pending + chunk).split('\n\n');
+        pending = events.pop();
+        for (const event of events) res.write(`${transformSseEvent(event)}\n\n`);
       });
-      pRes.on('end', () => res.end());
-    } else if (DOWNLOAD_URL_PREFIX) {
+      pRes.on('end', () => res.end(pending && transformSseEvent(pending)));
+    } else if (type.includes('application/json')) {
+      delete resHeaders['content-length'];
+      res.writeHead(pRes.statusCode, resHeaders);
       const chunks = [];
       pRes.on('data', (chunk) => chunks.push(chunk));
-      pRes.on('end', () => {
-        res.end(rewriteDownloadPaths(Buffer.concat(chunks).toString()));
-      });
+      pRes.on('end', () => res.end(transformPayload(Buffer.concat(chunks).toString())));
     } else {
+      res.writeHead(pRes.statusCode, resHeaders);
       pRes.pipe(res);
     }
   });
   p.on('error', () => {
     if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway'); }
   });
-  // When client disconnects, tear down the proxied request
   res.on('close', () => { if (!res.writableFinished) p.destroy(); });
-  req.pipe(p);
+  if (body) p.end(body);
+  else req.pipe(p);
 }
 
-function parseForm(req) {
-  return new Promise((resolve) => {
-    let b = '';
-    req.on('data', (c) => b += c);
-    req.on('end', () => resolve(new URLSearchParams(b)));
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
   });
+}
+
+async function parseForm(req) {
+  return new URLSearchParams((await readBody(req)).toString());
+}
+
+function parseJson(buf) {
+  try { return JSON.parse(buf.toString()); } catch { return null; }
 }
 
 function extractClientCredentials(req, body) {
@@ -254,7 +331,12 @@ const server = createServer(async (req, res) => {
       res.setHeader('WWW-Authenticate', `Bearer ${err}resource_metadata="${base}/.well-known/oauth-protected-resource"`);
       return json(res, 401, { error: 'unauthorized' });
     }
-    return proxy(req, res);
+    if (req.method !== 'POST') return proxy(req, res);
+    const body = await readBody(req);
+    const msg = parseJson(body);
+    if (msg?.method === 'tools/call' && msg.params?.name === DELETE_TOOL.name)
+      return json(res, 200, { jsonrpc: '2.0', id: msg.id, result: await deleteDownload(msg.params.arguments?.file) });
+    return proxy(req, res, body);
   }
 
   res.writeHead(404); res.end('Not Found');

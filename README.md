@@ -22,7 +22,7 @@ docker run -d --name yt-dlp-mcp --restart unless-stopped \
 | `REFRESH_TOKEN_TTL` | `7776000` (90 days) | Refresh token lifetime, seconds; each refresh issues a new one |
 | `MCP_BASE_URL` | derived from request | Public base URL, e.g. `https://yt.example.com` |
 | `DOWNLOAD_DIR` | `/root/Downloads` | Download location inside the container |
-| `DOWNLOAD_URL_PREFIX` | unset | If set, replaces `DOWNLOAD_DIR` paths in responses with this URL prefix |
+| `DOWNLOAD_URL_PREFIX` | unset | Public URL where `DOWNLOAD_DIR` is served, e.g. `https://nas.example.com/yt`. Download tools then return a full per-file URL instead of a container path |
 | `PORT` | `8000` | Listen port |
 
 Generate a secret with `openssl rand -hex 32`.
@@ -61,6 +61,20 @@ claude mcp add --transport http yt-dlp https://<your-host>/mcp --client-id <id> 
 ```
 
 `--client-secret` prompts for the secret (or reads `MCP_CLIENT_SECRET`).
+
+## Tools
+
+All [yt-dlp-mcp](https://github.com/kevinwatt/yt-dlp-mcp) tools, plus one added by the proxy:
+
+- `ytdlp_delete_download` — deletes a file from `DOWNLOAD_DIR`. Accepts the filename or the URL a download tool returned. Only plain filenames inside `DOWNLOAD_DIR` are accepted.
+
+With `DOWNLOAD_URL_PREFIX` set, download results read like:
+
+```
+Video successfully downloaded as "Some Title [id] 2026-09-26_13-32-21-266Z.webm": https://nas.example.com/yt/Some%20Title%20%5Bid%5D%202026-09-26_13-32-21-266Z.webm
+```
+
+The proxy does not serve the files itself; point a static file server at the downloads volume and set the prefix to its URL.
 
 ## Auth model
 

@@ -110,6 +110,27 @@ MCP_RESP=$(curl -sf -X POST $BASE/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
 echo "$MCP_RESP" | grep -q '"yt-dlp-mcp"' && pass "MCP initialize" || fail "MCP initialize: $MCP_RESP"
 
+# --- Delete tool is listed and deletes files ---
+MCP_HDRS=(-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Authorization: Bearer $TOKEN")
+SESSION=$(curl -s -D - -o /dev/null -X POST $BASE/mcp "${MCP_HDRS[@]}" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' \
+  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+curl -s -o /dev/null -X POST $BASE/mcp "${MCP_HDRS[@]}" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+TOOLS=$(curl -s -X POST $BASE/mcp "${MCP_HDRS[@]}" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+echo "$TOOLS" | grep -q '"ytdlp_delete_download"' && pass "delete tool listed" || fail "delete tool listed: $TOOLS"
+echo "$TOOLS" | grep -q '"ytdlp_download_video"' && pass "upstream tools listed" || fail "upstream tools listed: $TOOLS"
+
+docker exec $CONTAINER touch "/root/Downloads/test file #1.webm"
+DEL=$(curl -s -X POST $BASE/mcp "${MCP_HDRS[@]}" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ytdlp_delete_download","arguments":{"file":"test file #1.webm"}}}')
+echo "$DEL" | grep -q 'Deleted' && pass "delete tool" || fail "delete tool: $DEL"
+docker exec $CONTAINER test ! -e "/root/Downloads/test file #1.webm" && pass "file removed" || fail "file removed"
+DEL2=$(curl -s -X POST $BASE/mcp "${MCP_HDRS[@]}" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ytdlp_delete_download","arguments":{"file":"../../etc/hostname"}}}')
+echo "$DEL2" | grep -q '"isError":true' && pass "delete traversal rejected" || fail "delete traversal rejected: $DEL2"
+
 # --- Token response carries expiry and refresh token ---
 echo "$TOKEN_RESP" | grep -q '"expires_in"' && pass "expires_in issued" || fail "expires_in missing: $TOKEN_RESP"
 REFRESH=$(echo "$TOKEN_RESP" | grep -oP '"refresh_token":"\K[^"]+')
